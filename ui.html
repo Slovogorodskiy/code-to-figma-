@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Code to Figma</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; padding: 16px; color: #1f1f1f; }
+    h1 { font-size: 16px; margin: 0 0 8px; }
+    p { font-size: 12px; margin: 0 0 12px; color: #555; line-height: 1.5; }
+    .card { border: 1px solid #e7e7e7; border-radius: 10px; padding: 12px; margin-bottom: 12px; background: #fff; }
+    label { display:block; font-size: 12px; margin-bottom: 6px; font-weight: 600; }
+    input[type="file"], textarea, input[type="text"] { width: 100%; box-sizing: border-box; font-size: 12px; }
+    textarea { min-height: 90px; resize: vertical; }
+    .row { display:flex; gap:8px; }
+    .row > div { flex:1; }
+    button { border: 0; border-radius: 8px; padding: 10px 12px; font-size: 12px; cursor:pointer; }
+    .primary { background:#1860f2; color:white; font-weight:600; width:100%; }
+    .secondary { background:#f3f3f3; }
+    .status { font-size: 12px; margin-top: 8px; color:#333; }
+  </style>
+</head>
+<body>
+  <h1>Code → Figma (бесплатный импорт)</h1>
+  <p>Загрузите ваш <b>HTML</b> и <b>CSS</b>. Плагин создаст макеты с автолейаутом, стилями и фреймами под брейкпоинты.</p>
+
+  <div class="card">
+    <label>1) Файл HTML</label>
+    <input id="htmlFile" type="file" accept=".html,.htm,.txt" />
+  </div>
+
+  <div class="card">
+    <label>2) Файлы CSS (можно выбрать несколько)</label>
+    <input id="cssFiles" type="file" multiple accept=".css,.txt" />
+  </div>
+
+  <div class="card">
+    <label>3) Брейкпоинты (название:ширина)</label>
+    <input id="breakpoints" type="text" value="mobile:375, tablet:768, desktop:1440" />
+  </div>
+
+  <button class="primary" id="buildBtn">Создать макеты в Figma</button>
+  <div class="status" id="status">Ожидание файлов…</div>
+
+  <script>
+    const statusNode = document.getElementById('status');
+
+    function setStatus(text) {
+      statusNode.textContent = text;
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ''));
+        r.onerror = reject;
+        r.readAsText(file, 'utf-8');
+      });
+    }
+
+    function parseBreakpoints(input) {
+      return input.split(',').map((chunk) => chunk.trim()).filter(Boolean).map((part) => {
+        const [name, width] = part.split(':').map((x) => x.trim());
+        return { name, width: Number(width) };
+      }).filter((bp) => bp.name && Number.isFinite(bp.width));
+    }
+
+    function stripComments(css) {
+      return css.replace(/\/\*[\s\S]*?\*\//g, '');
+    }
+
+    function parseCSS(cssText) {
+      const css = stripComments(cssText);
+      const rules = [];
+
+      const mediaRegex = /@media\s*\((max|min)-width\s*:\s*(\d+)px\)\s*\{([\s\S]*?)\}/g;
+      let mediaMatch;
+      let cleaned = css;
+
+      while ((mediaMatch = mediaRegex.exec(css))) {
+        const [, kind, widthStr, block] = mediaMatch;
+        const width = Number(widthStr);
+        parseRuleBlock(block).forEach((r) => rules.push({ ...r, media: { kind, width } }));
+        cleaned = cleaned.replace(mediaMatch[0], '');
+      }
+
+      parseRuleBlock(cleaned).forEach((r) => rules.push({ ...r, media: null }));
+      return rules;
+    }
+
+    function parseRuleBlock(block) {
+      const ruleRegex = /([^{}]+)\{([^{}]+)\}/g;
+      const out = [];
+      let m;
+      while ((m = ruleRegex.exec(block))) {
+        const selectors = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+        const body = m[2].trim();
+        const declarations = {};
+        body.split(';').forEach((line) => {
+          const idx = line.indexOf(':');
+          if (idx > 0) {
+            const prop = line.slice(0, idx).trim().toLowerCase();
+            const val = line.slice(idx + 1).trim();
+            if (prop) declarations[prop] = val;
+          }
+        });
+        out.push({ selectors, declarations });
+      }
+      return out;
+    }
+
+    function elementPath(el) {
+      const path = [];
+      let cur = el;
+      while (cur && cur.nodeType === 1) {
+        const idx = cur.parentElement ? Array.from(cur.parentElement.children).indexOf(cur) : 0;
+        path.unshift(`${cur.tagName.toLowerCase()}:${idx}`);
+        cur = cur.parentElement;
+      }
+      return path.join('/');
+    }
+
+    function tokenizeSelector(selector) {
+      return selector.trim().split(/\s+/).map((part) => {
+        const token = { tag: null, id: null, classes: [] };
+        let chunk = part;
+        const idMatch = chunk.match(/#([a-zA-Z0-9_-]+)/);
+        if (idMatch) token.id = idMatch[1];
+        const classMatches = [...chunk.matchAll(/\.([a-zA-Z0-9_-]+)/g)];
+        token.classes = classMatches.map((m) => m[1]);
+        const tagMatch = chunk.match(/^[a-zA-Z][a-zA-Z0-9-]*/);
+        if (tagMatch) token.tag = tagMatch[0].toLowerCase();
+        return token;
+      });
+    }
+
+    function tokenMatchesElement(token, el) {
+      if (token.tag && token.tag !== el.tagName.toLowerCase()) return false;
+      if (token.id && token.id !== el.id) return false;
+      for (const cls of token.classes) {
+        if (!el.classList.contains(cls)) return false;
+      }
+      return true;
+    }
+
+    function selectorMatches(selector, element) {
+      const tokens = tokenizeSelector(selector);
+      let el = element;
+      let i = tokens.length - 1;
+      while (i >= 0) {
+        if (!el) return false;
+        if (tokenMatchesElement(tokens[i], el)) {
+          i -= 1;
+          el = el.parentElement;
+        } else {
+          el = el.parentElement;
+        }
+      }
+      return true;
+    }
+
+    function mediaApplies(media, width) {
+      if (!media) return true;
+      if (media.kind === 'max') return width <= media.width;
+      return width >= media.width;
+    }
+
+    function collectStyleForElement(el, rules, width) {
+      const style = {};
+      for (const rule of rules) {
+        if (!mediaApplies(rule.media, width)) continue;
+        for (const selector of rule.selectors) {
+          if (selectorMatches(selector, el)) {
+            Object.assign(style, rule.declarations);
+            break;
+          }
+        }
+      }
+      return style;
+    }
+
+    function collectText(el) {
+      return (el.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function domToAst(el, rules, breakpoints) {
+      const node = {
+        type: 'element',
+        tag: el.tagName.toLowerCase(),
+        path: elementPath(el),
+        text: '',
+        styles: {},
+        children: []
+      };
+
+      node.styles.base = collectStyleForElement(el, rules, breakpoints[breakpoints.length - 1].width);
+      for (const bp of breakpoints) {
+        node.styles[bp.name] = collectStyleForElement(el, rules, bp.width);
+      }
+
+      const childElements = Array.from(el.children || []);
+      if (childElements.length === 0) {
+        node.text = collectText(el);
+      } else {
+        for (const childEl of childElements) {
+          node.children.push(domToAst(childEl, rules, breakpoints));
+        }
+      }
+
+      return node;
+    }
+
+    async function build() {
+      const htmlFile = document.getElementById('htmlFile').files[0];
+      const cssFileList = Array.from(document.getElementById('cssFiles').files || []);
+      const breakpoints = parseBreakpoints(document.getElementById('breakpoints').value);
+
+      if (!htmlFile) {
+        setStatus('Сначала выберите HTML-файл.');
+        return;
+      }
+      if (breakpoints.length === 0) {
+        setStatus('Проверьте формат брейкпоинтов. Пример: mobile:375, tablet:768, desktop:1440');
+        return;
+      }
+
+      setStatus('Читаю файлы…');
+      const htmlText = await readFileAsText(htmlFile);
+      const cssTexts = await Promise.all(cssFileList.map(readFileAsText));
+      const cssCombined = cssTexts.join('\n');
+      const rules = parseCSS(cssCombined);
+
+      const doc = new DOMParser().parseFromString(htmlText, 'text/html');
+      const root = doc.body.firstElementChild || doc.documentElement;
+      if (!root) {
+        setStatus('Не удалось найти корневой элемент HTML.');
+        return;
+      }
+
+      setStatus('Собираю структуру…');
+      const ast = domToAst(root, rules, breakpoints);
+
+      parent.postMessage({ pluginMessage: { type: 'build-layout', payload: { ast, breakpoints } } }, '*');
+      setStatus('Готово! Макеты создаются в рабочем поле Figma…');
+    }
+
+    document.getElementById('buildBtn').addEventListener('click', () => {
+      build().catch((e) => {
+        console.error(e);
+        setStatus('Ошибка: ' + (e?.message || e));
+      });
+    });
+  </script>
+</body>
+</html>
