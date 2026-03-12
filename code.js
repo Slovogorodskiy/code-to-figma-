@@ -110,8 +110,13 @@ async function createTextNode(nodeData, style) {
     await figma.loadFontAsync(fontName);
     textNode.fontName = fontName;
   } catch (e) {
-    await figma.loadFontAsync({ family: 'Roboto', style: 'Regular' });
-    textNode.fontName = { family: 'Roboto', style: 'Regular' };
+    try {
+      await figma.loadFontAsync({ family: 'Roboto', style: 'Regular' });
+      textNode.fontName = { family: 'Roboto', style: 'Regular' };
+    } catch (_err) {
+      await figma.loadFontAsync({ family: 'Inter', style: 'Regular' });
+      textNode.fontName = { family: 'Inter', style: 'Regular' };
+    }
   }
 
   textNode.characters = nodeData.text || '';
@@ -195,12 +200,21 @@ async function createNodeTree(nodeData, parentFrame, bpName) {
 }
 
 async function buildLayout(payload) {
+  if (!payload || !payload.ast || !Array.isArray(payload.breakpoints) || payload.breakpoints.length === 0) {
+    throw new Error('Пустые данные для генерации макета.');
+  }
+
   const root = payload.ast;
   const breakpoints = payload.breakpoints;
 
-  const section = figma.createSection();
-  section.name = 'Code to Figma Import';
-  figma.currentPage.appendChild(section);
+  const groupFrame = figma.createFrame();
+  groupFrame.name = 'Code to Figma Import';
+  groupFrame.layoutMode = 'HORIZONTAL';
+  groupFrame.itemSpacing = 48;
+  groupFrame.primaryAxisSizingMode = 'AUTO';
+  groupFrame.counterAxisSizingMode = 'AUTO';
+  groupFrame.fills = [];
+  figma.currentPage.appendChild(groupFrame);
 
   for (const bp of breakpoints) {
     const screenFrame = figma.createFrame();
@@ -211,13 +225,13 @@ async function buildLayout(payload) {
     screenFrame.resize(bp.width, 10);
     screenFrame.fills = [{ type: 'SOLID', color: { r: 1, g: 1, b: 1 } }];
     screenFrame.itemSpacing = 0;
-    section.appendChild(screenFrame);
+    groupFrame.appendChild(screenFrame);
 
     await createNodeTree(root, screenFrame, bp.name);
   }
 
-  figma.currentPage.selection = [section];
-  figma.viewport.scrollAndZoomIntoView([section]);
+  figma.currentPage.selection = [groupFrame];
+  figma.viewport.scrollAndZoomIntoView([groupFrame]);
 }
 
 figma.ui.onmessage = async (msg) => {
